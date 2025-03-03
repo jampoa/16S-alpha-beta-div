@@ -32,6 +32,10 @@ We recommend to create a new R project and move 16S-alpha-beta-div.Rmd to the pr
 
     * https://zenodo.org/records/4587955/files/silva_nr99_v138.1_train_set.fa.gz?download
     * https://zenodo.org/records/4587955/files/silva_species_assignment_v138.1.fa.gz?download
+ 
+* A file 'sample_metadata.txt' in a directory myRproject/data/context containing the metadata for beta diversity analysis
+
+  See the provided example.
 
 
 ## WHAT DOES THE PIPELINE DO?
