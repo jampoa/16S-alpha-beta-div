@@ -1,0 +1,1398 @@
+---
+title: "16S-alpha-beta-div"
+author: "Rabja Maria Popall"
+date: "2025-02-20"
+output: html_document
+---
+
+
+
+# NOTICE
+
+
+
+This pipeline is based on the workflow and source code provided in the ANF-MetaBioDiv repository (version September 2023, OMICS platform with Fabrice Armougom and Marc Garel, Mediterranean Institute of Oceanology UMR 7294, Marseille, France). The original scripts are available here: https://github.com/ANF-MetaBioDiv/course-material/tree/main/practicals 
+
+
+
+# PREPARE WORKSPACE
+
+
+
+## Prepare working directory
+
+Before starting, we recommend to create a new R project and place this script in the project directory.
+
+
+## Attach packages
+
+Install packages if needed.
+
+```{r}
+install.packages("ggplot2")
+install.packages("patchwork")
+install.packages("dplyr")
+install.packages("zCompositions")
+install.packages("fpc")
+install.packages("vegan")
+install.packages("NbClust", lib = ".")
+
+install.packages("BiocManager")
+
+BiocManager::install("devtools")
+BiocManager::install("phyloseq")
+BiocManager::install("microbiome") 
+BiocManager::install("MicrobiotaProcess")
+BiocManager::install("stats")
+```
+
+Load the packages.
+
+```{r}
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(zCompositions)
+library(fpc)
+library(vegan)
+library("NbClust", lib.loc = ".")
+library(devtools)
+library(phyloseq)
+library(microbiome)
+library(MicrobiotaProcess)
+library(stats)
+```
+
+
+## Attach custom functions from the ANF-MetaBioDiv repository
+
+We will use R functions from the ANF-MetaBioDiv repository (Fabrice Armougom and Marc Garel, Mediterranean Institute of Oceanology UMR 7294, Marseille, France). 
+
+Download the directory `R/` containing the scripts to your working directory.
+
+```{bash}
+mkdir ./R
+cd R
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/R/NbClust_indexlist.R
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/R/alpha_diversity.R
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/R/beta_diversity.R
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/R/preprocessing.R
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/R/utils.R
+cd ..
+```
+
+Download the directory `man/` containing the documentation to your working directory.
+
+```{bash}
+mkdir ./man
+cd man
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/df_export.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/ggrare.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/indices_normality.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/nb_clust_all.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/primer_trim.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/qualityprofile.Rd
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/man/run_cutadapt_command.Rd
+cd ..
+```
+
+Download the DESCRIPTION file to your working directory.
+
+```{bash}
+wget https://raw.githubusercontent.com/ANF-MetaBioDiv/course-material/refs/heads/main/DESCRIPTION
+```
+
+Source all the scripts from the folder `R/` along with the documentation in `man/`.
+
+```{r}
+devtools::load_all()
+```
+
+
+
+# PREPROCESSING DADA2
+
+
+
+## Prepare working directory
+
+### Dowload the the Silva v138 reference database
+
+Make a directory `data/refdb/`for the reference data base.
+
+```{bash}
+mkdir ./data/refdb
+```
+
+Download the files from your web browser and place them in `data/refdb`:
+https://zenodo.org/records/4587955/files/silva_nr99_v138.1_train_set.fa.gz?download
+https://zenodo.org/records/4587955/files/silva_species_assignment_v138.1.fa.gz?download
+
+Assign the directory `data/refdb/` to a variable `refdb_folder`.
+
+```{r}
+refdb_folder <- here::here("data", "refdb")
+```
+
+### Locate the raw sequencing data
+
+Make a directory `data/raw` for the raw sequencing data.
+
+```{bash}
+mkdir ./data/raw
+```
+
+Place the paired-end, gzipped fastq files in `data/raw`.
+The files must be named as follows:
+`${SAMPLENAME}_R1.fastq.gz` for the forward reads
+`${SAMPLENAME}_R2.fastq.gz` for the reverse reads.
+
+Save the path to `data/raw/` to a variable `path_to_fastqs`.
+
+```{r}
+path_to_fastqs <- here::here("data", "raw")
+```
+
+List the file names.
+
+```{r}
+fnFs <- sort(list.files(path_to_fastqs,
+                        pattern = "_R1.fastq.gz",
+                        full.names = TRUE))
+fnRs <- sort(list.files(path_to_fastqs,
+                        pattern = "_R2.fastq.gz",
+                        full.names = TRUE))
+```
+
+Extract the sample names.
+
+```{r}
+sample_names <- basename(fnFs) |>
+  strsplit(split = "_") |>
+  sapply(head, 1)
+sample_names
+```
+
+
+## Sequence quality check
+
+Create a directory `outputs/dada2/quality_plots` for the output.
+
+```{r results=FALSE}
+# create a directory for the outputs
+quality_folder <- here::here("outputs",
+                             "dada2",
+                             "quality_plots")
+
+if (!dir.exists(quality_folder)) {
+  dir.create(quality_folder, recursive = TRUE)
+}
+```
+
+Run the custom function `qualityprofile()` from `R/preprocessing.R`.
+
+```{r}
+qualityprofile(fnFs,
+               fnRs,
+               file.path(quality_folder, "quality_plots.pdf"))
+```
+
+
+## Primer removal
+
+Create a directory `outputs/dada2/trimmed` for the output.
+
+```{r}
+path_to_trimmed_reads <- here::here(
+  "outputs",
+  "dada2",
+  "trimmed"
+)
+
+if (!dir.exists(path_to_trimmed_reads)) dir.create(path_to_trimmed_reads, recursive = TRUE)
+```
+
+The data we are working with correspond to the V3-V4 region using the primers 341F (`CCTACGGGNBGCWSCAG`) and 805R (`GACTACNVGGGTATCTAATCC`). 
+
+Save the forward and reverse primers to variables.
+
+```{r}
+primer_fwd  <- "CCTACGGGNBGCWSCAG"
+primer_rev  <- "GGACTACNVGGGTATCTAATCC"
+```
+
+Remove the primers with the `removePrimers()` function.
+
+List paths.
+
+```{r}
+nopFw <- file.path(path_to_trimmed_reads, basename(fnFs))
+nopRv <- file.path(path_to_trimmed_reads, basename(fnRs))
+```
+
+Remove primers.
+
+```{r}
+# Forward primers
+dada2::removePrimers(fn = fnFs,
+                     fout = nopFw,
+                     primer.fwd = primer_fwd,
+                     max.mismatch = 1,
+                     verbose = TRUE)
+# Reverse primers
+dada2::removePrimers(fn = fnRs,
+                     fout = nopRv,
+                     primer.fwd = primer_rev,
+                     max.mismatch = 1,
+                     verbose = TRUE)
+```
+
+
+## Trimming and quality filtering
+
+Create a directory `outputs/dada2/filtered` for the output.
+
+```{r}
+path_to_filtered_reads <- here::here("outputs", "dada2", "filtered")
+if (!dir.exists(path_to_filtered_reads)) dir.create(path_to_filtered_reads, recursive = TRUE)
+```
+
+List paths.
+
+```{r}
+filtFs <- file.path(path_to_filtered_reads, basename(fnFs))
+filtRs <- file.path(path_to_filtered_reads, basename(fnRs))
+```
+
+Link file and sample names.
+
+```{r}
+names(filtFs) <- sample_names
+names(filtRs) <- sample_names
+```
+
+Run the `dada2::filterAndTrim()` function.
+
+```{r}
+(out <- dada2::filterAndTrim(
+  fwd = nopFw,
+  filt = filtFs,
+  rev = nopRv,
+  filt.rev = filtRs,
+  minLen = 150,
+  matchIDs = TRUE,
+  maxN = 0,
+  maxEE = c(3, 3),
+  truncQ = 2
+))
+```
+
+
+## Denoising
+
+### Error model
+
+For denoising, we need an error model determining the probability of a nucleotide being wrongly read as another for a given quality score. 
+
+This error model can be learnt directly from the data with the function `dada2::learnErrors()`.
+
+```{r}
+errF <- dada2::learnErrors(filtFs,
+                           randomize = TRUE,
+                           multithread = TRUE)
+
+errR <- dada2::learnErrors(filtRs,
+                           randomize = TRUE,
+                           multithread = TRUE)
+```
+
+Visualize the resulting error model using the function `dada2::plotErrors()`.
+
+```{r}
+dada2::plotErrors(errF, nominalQ=TRUE)
+```
+
+### Dereplication
+
+Dereplicate the sequences using the function `dada2::derepFastq()`.
+
+```{r}
+derepFs <- dada2::derepFastq(filtFs, verbose = TRUE)
+
+derepRs <- dada2::derepFastq(filtRs, verbose = TRUE)
+```
+
+### Final denoising
+
+Run the denoising algorithm `dada2::dada()` with the error model and the dereplicated sequences.
+
+```{r}
+dadaFs <- dada2::dada(derepFs, err = errF, multithread = TRUE)
+
+dadaRs <- dada2::dada(derepRs, err = errR, multithread = TRUE)
+```
+
+
+## Merge paired-end reads
+
+Merge the denoised forward and reverse reads with `dada2::mergePairs()`.
+
+```{r}
+mergers <- dada2::mergePairs(
+  dadaF = dadaFs,
+  derepF = derepFs,
+  dadaR = dadaRs,
+  derepR = derepRs,
+  maxMismatch = 0,
+  verbose = TRUE
+)
+```
+
+
+## Build an ASV table
+
+Summarize the number of reads for each amplicon sequence variant (ASV) per sample in an ASV table.
+
+```{r}
+seqtab <- dada2::makeSequenceTable(mergers)
+```
+
+
+## Remove chimeras
+
+Remove artifact sequences using the function `dada2::removeBimeraDenovo()`
+
+```{r}
+seqtab_nochim <- dada2::removeBimeraDenovo(seqtab,
+                                           method = "consensus",
+                                           multithread = TRUE,
+                                           verbose = TRUE)
+```
+
+
+## Taxonomic assignment from dada2
+
+In a first step, assign each ASV to a taxonomy using the RDP Naive Bayesian Classifier algorithm called by the function `dada2::assignTaxonomy()`.
+
+Assign database directories to variables.
+
+```{r}
+silva_train_set <- file.path(refdb_folder,"silva_nr99_v138.1_train_set.fa.gz")
+silva_species_assignment <- file.path(refdb_folder,"silva_species_assignment_v138.1.fa.gz")
+silva_train_set
+silva_species_assignment
+```
+
+Run taxonomic assignment.
+
+```{r}
+taxonomy <- dada2::assignTaxonomy(
+  seqs = seqtab_nochim,
+  refFasta = silva_train_set,
+  taxLevels = c("Kingdom", "Phylum", "Class",
+                "Order", "Family", "Genus",
+                "Species"),
+  multithread = TRUE,
+  minBoot = 60
+)
+```
+
+In a second step, try whether some ASVs can be assigned to the species level with `dada2::addSpecies()`
+
+```{r}
+taxonomy <- dada2::addSpecies(
+  taxonomy,
+  silva_species_assignment,
+  allowMultiple = FALSE
+)
+```
+
+
+## Export the preprocessed data
+
+### R objects
+
+Export ASV table and taxonomy as R objects to a directory `outputs/dada2/asv_table`
+
+```{r}
+export_folder <- here::here("outputs", "dada2", "asv_table")
+
+if (!dir.exists(export_folder)) dir.create(export_folder, recursive = TRUE)
+
+saveRDS(object = seqtab_nochim,
+        file = file.path(export_folder, "seqtab_nochim.rds"))
+
+saveRDS(object = taxonomy,
+        file = file.path(export_folder, "taxonomy.rds"))
+```
+
+It is recommended to export ASV table and taxonomy as txt files, as well as the sequences as a fasta file.
+
+### Text files
+
+Export ASV table and taxonomy as text files as well as the sequences as a fasta file.
+
+First, format the data.
+
+```{r}
+# Create a new variable `asv_seq` to collect the ASV sequences
+asv_seq <- colnames(seqtab_nochim)
+
+# Create a short, unique IDs for each ASV.
+ndigits <- nchar(length(asv_seq))
+asv_id <- sprintf(paste0("ASV_%0", ndigits, "d"), seq_along(asv_seq))
+
+# Rename the variables with the new IDs.
+row.names(taxonomy) <- colnames(seqtab_nochim) <- names(asv_seq) <- asv_id
+
+# Convert the row names (ASV IDs) into a new column named `asv` using the custom function `df_export()`
+taxonomy_export <- df_export(taxonomy, new_rn = "asv")
+seqtab_nochim_export <- t(seqtab_nochim)
+seqtab_nochim_export <- df_export(seqtab_nochim_export, new_rn = "asv")
+```
+
+Then, export the data. 
+
+```{r}
+# Export the taxonomy
+write.table(taxonomy_export,
+            file = file.path(export_folder, "taxonomy.tsv"),
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE)
+
+# Export the ASV table
+write.table(seqtab_nochim_export,
+            file = file.path(export_folder, "asv_table.tsv"),
+            quote = FALSE,
+            sep = "\t",
+            row.names = FALSE)
+
+# Export the sequences as a fasta file
+cat(paste0(">", names(asv_seq), "\n", asv_seq),
+    sep = "\n",
+    file = file.path(export_folder, "asv.fasta"))
+```
+
+### Summary table
+
+Export the preprocessing statistics.
+
+```{r}
+getN <- function(x) sum(dada2::getUniques(x))
+
+log_table <- data.frame(
+                    Input =sapply(fnFs, getN),
+                    KeepFwdPrimer=sapply(nopFw, getN),
+                    KeepRevprimer=sapply(nopRv, getN),
+                    Filtered = out[, 2],
+                    DenoisedF = sapply(dadaFs, getN),
+                    DenoisedR = sapply(dadaRs, getN),
+                    Merged = sapply(mergers, getN),
+                    Nonchim = rowSums(seqtab_nochim),
+                    perc_retained = rowSums(seqtab_nochim) / out[, 1] * 100)
+
+rownames(log_table) <- sample_names
+
+df_export(log_table, new_rn = "sample") |>
+  write.table(file = file.path(export_folder, "log_table.tsv"),
+              quote = FALSE,
+              sep = "\t",
+              row.names = FALSE)
+```
+
+*Remove samples that retain little to no sequences after preprocessing and repeat with the reduced sample set if adequate.*
+
+
+
+# PREPROCESSING PHYLOSEQ
+
+
+
+## Prepare working directory
+
+### Import the preprocessed data
+
+Import ASV table, taxonomy and sequences from the text files we exported after preprocessing.
+
+```{r}
+input_dir <- here::here("outputs", "dada2", "asv_table")
+
+asv_table <- read.table(file = file.path(input_dir, "asv_table.tsv"),
+                        header = TRUE,
+                        sep = "\t",
+                        row.names = 1)
+
+taxonomy <- read.table(file = file.path(input_dir, "taxonomy.tsv"),
+                        header = TRUE,
+                        sep = "\t",
+                        row.names = 1)
+```
+
+### Import sample metadata
+
+The example metadata contains the categorical variables *Csource*, *Timepoint* and *Run* in columns.
+
+Place the sample metadata file `sample_metadata.txt` in a directory `data/context/`
+
+```{r}
+context <- read.table(here::here("data",
+                                 "context",
+                                 "sample_metadata.txt"),
+                      header = TRUE,
+                      row.names = 1)
+```
+
+
+## Create phyloseq object
+
+### Check sample file
+
+Verify that the sample names in the ASV table are identical with the ones in the sample metadata table using the function `setdiff()`.
+
+```{r}
+setdiff(x = colnames(asv_table),
+        y = row.names(context))
+```
+
+### Assemble ASV table, taxonomy and sample metadata
+
+```{r}
+# You might need to convert asv_seq into a DNAStringSet
+# library(Biostrings)
+# asv_seq <- DNAStringSet(asv_seq)
+```
+
+```{r}
+physeq <- phyloseq::phyloseq(
+  phyloseq::otu_table(asv_table, taxa_are_rows = TRUE),
+  phyloseq::tax_table(as.matrix(taxonomy)),
+  phyloseq::sample_data(context),
+  phyloseq::refseq(asv_seq)
+)
+```
+
+### Add a phylogenetic tree
+
+Align the ASVs sequences with `DECIPHER::AlignSeqs()`.
+
+```{r results=FALSE}
+aln <- refseq(physeq) |>
+  DECIPHER::AlignSeqs(anchor = NA)
+```
+
+```{r}
+# You can visualize the alignment with `DECIPHER::BrowseSeqs()`.
+# DECIPHER::BrowseSeqs(aln, highlight = 0)
+```
+
+Reconstruct a neighbour joining tree using `phangorn`.
+
+```{r}
+# Convert the `DNAStringSet` alignment to the `phangorn::phyDat` format
+phang_align <- as.matrix(aln) |> phangorn::phyDat(type = "DNA")
+
+# Compute pairwise distances of our aligned sequences using equal base frequencies (JC69 model by default).
+dm <- phangorn::dist.ml(phang_align, model = "JC69")
+
+# Reconstruct the tree
+treeNJ <- phangorn::NJ(dm)
+```
+
+Root the tree at midpoint.
+
+```{r}
+treeNJ <- phangorn::midpoint(tree = treeNJ)
+```
+
+Add the rooted tree to the phyloseq object.
+
+```{r}
+physeq <- phyloseq::merge_phyloseq(physeq,treeNJ)
+```
+
+
+## Save phyloseq object
+
+```{r}
+# Prepare output directory `outputs/phyloseq/` 
+directory_output_phyloseq <- here::here("outputs","phyloseq")
+if (!dir.exists(directory_output_phyloseq)) dir.create(directory_output_phyloseq)
+
+# Assign phyloseq object to a variable
+phylobject <- file.path(directory_output_phyloseq,"phyloseq_object_alpha_beta_div.rds")
+
+# Save phyloseq object
+saveRDS(physeq,file=phylobject)
+```
+
+
+
+# ALPHA DIVERSITY
+
+
+
+## Prepare working directory
+
+Create a directory `outputs/alpha_diversity` for results.
+
+```{r}
+output_alpha <- here::here("outputs", "alpha_diversity")
+if (!dir.exists(output_alpha)) dir.create(output_alpha, recursive = TRUE)
+```
+
+Load the phyloseq object if needed.
+
+```{r}
+physeq <- readRDS(here::here("outputs",
+                             "phyloseq",
+                             "phyloseq_object_alpha_beta_div.rds"))
+```
+
+```{r}
+# The composition of physeq is as follows:
+# ASV table: physeq@otu_table
+# Sample metadata: physeq@sam_data
+# Taxonomy: physeq@tax_table
+# Phylogenetic tree: physeq@phy_tree
+# Reference sequences: physeq@refseq
+```
+
+
+##  Data normalization by subsampling
+
+### Rarefaction curves before normalization
+
+Rarefaction curves allow to evaluate the sequencing quality and make decisions regarding sample normalization.
+
+First, check the number of reads (size) of your samples.
+
+```{r}
+phyloseq::sample_sums(physeq)
+```
+
+Decide whether the minimal sample size is a good depth for normalization.
+Does the minimal sample size preserve an adequate amount of information in all samples? If not, is it preferable to exclude very small samples from the analysis?
+
+Establish rarefaction curves using the custom function `ggrare()` defined in `R/alpha_diversity.R`
+
+```{r,results='hide'}
+# Create rarefaction curves with a line indicating the minimal sample size  
+rare_plot_before <- ggrare(physeq, step = 10, color = "Csource", se = FALSE) +
+  geom_vline(xintercept = min(sample_sums(physeq)), color = "gray60")
+```
+
+Plot the final graph using the `ggplot2` library.
+
+```{r}
+custom_colors <- c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")
+
+# Customize the plot appearance
+rare_plot_before_final <- rare_plot_before + 
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    panel.background = element_blank(),        # Remove background
+    panel.grid.major = element_blank(),        # Remove major grid lines
+    panel.grid.minor = element_blank(),        # Remove minor grid lines
+    axis.line = element_line(color = "black"), # Keep axis lines
+    axis.ticks = element_line(color = "black"),# Keep axis ticks
+    axis.text = element_text(color = "black"), # Keep axis text
+    axis.title = element_text(color = "black") # Keep axis title
+  )
+```
+
+Save the final graph to the output directory.
+
+```{r}
+ggsave(filename = "outputs/alpha_diversity/rarefaction_curves_BEFORE.png", plot = rare_plot_before_final, dpi = 300, width = 8, height = 5, units = "in")
+```
+
+### Subsampling
+
+Subsample the data set at the chosen rarefaction depth (default is minimal sample size).
+
+```{r}
+physeq_rar <- phyloseq::rarefy_even_depth(physeq, rngseed = TRUE)
+```
+
+### Rarefaction curves after normalization
+
+Establish rarefaction curves of the normalized data using the custom function `ggrare()`
+
+```{r,results='hide'}
+rare_plot_after <- ggrare(physeq_rar, step = 10, color = "Csource", se = TRUE)
+```
+
+Plot the final graph.
+
+```{r}
+colors <- c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")
+
+rare_plot_after_final <- rare_plot_after + 
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  theme(
+    panel.background = element_blank(),        # Remove background
+    panel.grid.major = element_blank(),        # Remove major grid lines
+    panel.grid.minor = element_blank(),        # Remove minor grid lines
+    axis.line = element_line(color = "black"), # Keep axis lines
+    axis.ticks = element_line(color = "black"),# Keep axis ticks
+    axis.text = element_text(color = "black"), # Keep axis text
+    axis.title = element_text(color = "black") # Keep axis title
+  )
+```
+
+Save the final graph. 
+
+```{r}
+ggsave(filename = "outputs/alpha_diversity/rarefaction_curves_AFTER.png", plot = rare_plot_after_final, dpi = 300, width = 8, height = 5, units = "in")
+```
+
+
+##  Alpha diversity indices
+
+### Establish taxonomy-based diversity indices
+
+Calculate indices using the `microbiome` library.
+
+```{r}
+# Get different indices with alpha function (index="all" to calculate all indices)
+alpha_indices <- microbiome::alpha(
+  physeq_rar,
+  index = c("observed", "diversity_gini_simpson",
+          "diversity_shannon", "evenness_pielou",
+          "dominance_relative")
+)
+
+# Save results
+write.table(alpha_indices,
+            file = file.path(output_alpha, "taxonomic_indices_alpha_diversity.txt"),
+            sep = "\t")
+```
+
+Add the taxonomy-based indices to the sample metadata.
+
+```{r}
+# Turn into sample_data object with sample_data function
+alpha_indices <- phyloseq::sample_data(alpha_indices)
+
+# Add alpha_indices to phyloseq sample_data object with merge_phyloseq function
+physeq_rar <- phyloseq::merge_phyloseq(physeq_rar, alpha_indices)
+```
+
+### Establish phylogeny-based diversity indices
+
+```{r}
+# Calculate indices with the get_NRI_NTI function from the MicrobiotaProcess library
+ind_comp <- MicrobiotaProcess::get_NRI_NTI(physeq_rar,
+                                           abundance.weighted = FALSE,
+                                           metric = "all",
+                                           seed = 123)
+
+# Retrieve indices of interest from ind_comp@alpha
+indi_comp <- as.data.frame(ind_comp@alpha)
+NRI_NTI_PB <- dplyr::select(indi_comp, NRI:PD)
+
+# Save results
+write.table(indi_comp,
+            file = file.path(output_alpha, "phylogenetic_indices_alpha_diversity.txt"),
+            sep = "\t")
+```
+
+Add the phylogeny-based indices to the sample metadata.
+
+```{r,results='hide'}
+# Turn into sample_data object
+NRI_NTI_PB <- phyloseq::sample_data(NRI_NTI_PB)
+
+# Add alpha_indices to sample_data
+physeq_rar <- phyloseq::merge_phyloseq(physeq_rar, NRI_NTI_PB)
+```
+
+```{r}
+# You can inspect the updated sample metadata object by running 
+# sample_data(physeq_rar)
+```
+
+
+## Save the normalized physeq_rar object with alpha diversity indices
+
+```{r}
+phylobject_rar <- file.path(directory_output_phyloseq,"phyloseq_object_rar_alpha_beta_div.rds")
+
+saveRDS(physeq_rar,file=phylobject_rar)
+```
+
+
+## Alpha diversity graphs 
+
+Read the phyloseq class object sample_data as dataframe.
+
+```{r}
+metadata <- data.frame(sample_data(physeq_rar))
+```
+
+Plot the observed diversity (number of ASVs) with ggplot2.
+
+```{r}
+p1 <- ggplot(metadata, aes(x = Csource, y = observed)) +
+  geom_boxplot(alpha = 0.6,
+               fill = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60"),
+               color = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +
+  geom_jitter(aes(colour = Csource),  # Specify only color aesthetic
+              position = position_jitter(0.07), 
+              cex = 2) +
+  scale_color_manual(name = "Carbon source", values = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +  # Set legend title and point colors
+  labs(y = "Observed diversity", x = "") +  # Remove x-axis label
+  theme_minimal() +  # Use minimal theme
+  theme(axis.title.x = element_blank(),  # Remove x-axis title
+        axis.text.x = element_blank(),   # Remove x-axis text
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks
+        panel.grid.major = element_blank(),  # Remove grey gridlines
+        panel.grid.minor = element_blank(),  # Change gridline color
+panel.border = element_rect(color = "lightgrey", fill = NA, size = 1)) 
+```
+
+Plot the Shannon index with ggplot2.
+
+```{r}
+p2 <- ggplot(metadata, aes(x = Csource, y = diversity_shannon)) +
+  geom_boxplot(alpha = 0.6,
+               fill = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60"),
+               color = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +
+  geom_jitter(aes(colour = Csource),  # Specify only color aesthetic
+              position = position_jitter(0.07), 
+              cex = 2) +
+  scale_color_manual(name = "Carbon source", values = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +  # Set legend title and point colors
+  labs(y = "Shannon diversity", x = "") +  # Remove x-axis label
+  theme_minimal() +  # Use minimal theme
+  theme(axis.title.x = element_blank(),  # Remove x-axis title
+        axis.text.x = element_blank(),   # Remove x-axis text
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks
+        panel.grid.major = element_blank(),  # Remove grey gridlines
+        panel.grid.minor = element_blank(),  # Change gridline color
+panel.border = element_rect(color = "lightgrey", fill = NA, size = 1)) 
+```
+
+Plot the Pielou evenness with ggplot2.
+
+```{r}
+p3 <- ggplot(metadata, aes(x = Csource, y = evenness_pielou)) +
+  geom_boxplot(alpha = 0.6,
+               fill = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60"),
+               color = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +
+  geom_jitter(aes(colour = Csource),  # Specify only color aesthetic
+              position = position_jitter(0.07), 
+              cex = 2) +
+  scale_color_manual(name = "Carbon source", values = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +  # Set legend title and point colors
+  labs(y = "Pielou evenness", x = "") +  # Remove x-axis label
+  theme_minimal() +  # Use minimal theme
+  theme(axis.title.x = element_blank(),  # Remove x-axis title
+        axis.text.x = element_blank(),   # Remove x-axis text
+        axis.ticks.x = element_blank(),  # Remove x-axis ticks
+        panel.grid.major = element_blank(),  # Remove grey gridlines
+        panel.grid.minor = element_blank(),  # Change gridline color
+panel.border = element_rect(color = "lightgrey", fill = NA, size = 1)) 
+```
+
+Combine observed diversity, Shannon diversity and Pielou evenness into one graph.
+
+```{r, results='hide'}
+plot_alpha_indices <- p1 + p2 + p3 +
+  patchwork::plot_annotation(tag_levels = "A") +
+  patchwork::plot_layout(guides = "collect")
+```
+
+Save the final alpha diversity plot. 
+
+```{r}
+ggsave("outputs/alpha_diversity/alpha_diversity.png", plot = plot_alpha_indices, width = 8, height = 6, units = "in", dpi = 300)
+```
+
+
+
+# BETA DIVERSITY
+
+
+
+## Prepare working directory
+
+Create a directory `outputs/beta_diversity` for results.
+
+```{r}
+output_beta <- here::here("outputs", "beta_diversity")
+if (!dir.exists(output_beta)) dir.create(output_beta, recursive = TRUE)
+```
+
+Load the original (non-rarefied!) phyloseq object if necessary.
+
+```{r}
+physeq <- readRDS(here::here("outputs",
+                             "phyloseq",
+                             "phyloseq_object_alpha_beta_div.rds"))
+```
+
+
+## Data normalization
+
+We will use two different normalization approaches, which both have their advantages and limitations. 
+To prepare the data for relative abundance analysis, we will rarefy the data set by subsampling at a defined depth (as done for the alpha diversity analysis above).
+To prepare the data for distance matrix analysis, we will perform a centered-log ration transformation to account for the compositional nature of sequencing data.
+
+### Subsampling
+
+As above, we will normalize at minimal sample size.
+Reminder: you can check the size of your samples and evaluate whether the minimal sample size is a good rarefaction depth with `phyloseq::sample_sums(physeq)`
+
+Rarefy the data set at the minimum sample size (default). 
+
+```{r}
+set.seed(10000)
+physeq_rar <- rarefy_even_depth(physeq)
+```
+
+### Centered log-ratio transformation
+
+Sequencing data is compositional, which means that read abundances are not independent from each other and thus not representative of the ecological reality: The total number of reads is constrained by the sequencing depth, so an increase of a specific read necessarily decreases the observed abundance of all other reads. 
+This is problematic, because many statistical methods assume independence of the input data. To apply these methods, we will transform the relative read abundances into log-ratios in an Euclidian space: We will express each taxon's abundance relative to the geometric mean of the entire sample. 
+We will use the centered log-ratio transformed (CLR) data to run a beta diversity ordination based on Aitchison distances further down below.
+
+CLR transformation.
+
+```{r message=FALSE, warning=FALSE}
+
+# First replace zeros using the Count Zero Multiplicative approach with the zCompositions package
+tmp <- zCompositions::cmultRepl(physeq@otu_table,
+                                method = "CZM",
+                                label = 0,
+                                z.warning = 1)
+
+# Compute the CLR. ASVs are in rows!!!!!
+physeq_clr_asv_col <- apply(tmp, 1, function(x) log(x) - mean(log(x)))
+
+# Transpose the table so that the ASVs are in rows
+physeq_clr_asv <- t(physeq_clr_asv_col)
+```
+
+Create a new phyloseq object with the CLR-transformed counts.
+
+```{r}
+physeq_clr <- physeq
+otu_table(physeq_clr) <- otu_table(physeq_clr_asv, taxa_are_rows = TRUE)
+data.frame(physeq_clr@otu_table@.Data[1:5, 1:10])
+```
+
+
+## Community composition
+
+### Calculate relative abundances for a given taxonomic rank
+
+Agglomerate ASVs at a taxonomic rank (e.g., genus) and transform the sample counts into relative abundances.
+
+```{r}
+physeq_phylum_genus <- physeq_rar %>%
+  tax_glom(taxrank = "Genus") %>%                     # agglomerate at genus level
+  transform_sample_counts(function(x) {x/sum(x)} ) %>% # Transform to relative abundance
+  psmelt() %>%                                         # Melt to long format
+  filter(Abundance > 0.03) %>%                         # Filter out low abundance taxa
+  arrange(Genus)                                      # Sort data frame alphabetically by genus
+```
+
+### Stacked barplots
+
+Define a color palette.
+
+```{r}
+# custom palette order 
+colors <- c("palevioletred","darkorange","#E64B35","#DC0000", "chocolate", "#4DBBD5", "#00ccff","turquoise","#1f77b4", "#3C5488", "#8491B4", "#9467bd","blueviolet","#F39B7FFF", "#e377c2", "#00A087", "#91D1C2FF", "darkseagreen", "forestgreen", "#FFDC91", "gold")
+```
+
+Reorder levels of the x variable (by default they are in alphabetical order).
+
+```{r}
+# This does not alter the original dataset
+physeq_phylum_genus$Sample <- factor(physeq_phylum_genus$Sample, levels = c("Ac1.t0","Ac2.t0","Ac1.t14","Ac2.t12","Ac1.t26","Ac2.t25","Bc1.t0","Bc2.t0","Bc1.t7","Bc2.t13","Bc1.t26","Bc2.t26","Fo1.t0","Fo2.t0","Fo1.t23","Fo2.t12","Fo1.t26","Fo2.t25","G1.t0","G2.t0","G1.t16","G1.t26","G2.t26","INOC1","INOC2"))
+```
+
+Define facet groups.
+
+```{r}
+# Define custom groups
+ac <- c("Ac1.t0", "Ac2.t0", "Ac1.t14", "Ac2.t12", "Ac1.t26", "Ac2.t25")
+bc <- c("Bc1.t0", "Bc2.t0", "Bc1.t7", "Bc2.t13", "Bc1.t26", "Bc2.t26")
+fo <- c("Fo1.t0", "Fo2.t0", "Fo1.t23", "Fo2.t12", "Fo1.t26", "Fo2.t25")
+g <- c("G1.t0", "G2.t0", "G1.t16", "G1.t26", "G2.t26")
+inoc <- c("INOC1", "INOC2")
+
+# Create a new variable for custom groups
+physeq_phylum_genus$CustomGroup <- ifelse(physeq_phylum_genus$Sample %in% ac, "Acetate",
+                                    ifelse(physeq_phylum_genus$Sample %in% bc, "Bicarbonate",
+                                           ifelse(physeq_phylum_genus$Sample %in% fo, "Formate",
+                                                  ifelse(physeq_phylum_genus$Sample %in% g, "Glycine",
+                                                         ifelse(physeq_phylum_genus$Sample %in% inoc, "Inoculum", NA)))))
+
+# Define custom facet labels
+facet_labels <- c("Acetate", "Bicarbonate", "Formate", "Glycine", "Inoculum")
+```
+
+Plot the graph with ggplot2.
+
+```{r}
+rel_abundance_genus <- ggplot(physeq_phylum_genus, aes(x = Sample, y = Abundance, fill = Genus)) + 
+  geom_bar(stat = "identity") +
+  facet_wrap(~ CustomGroup, nrow = 1, scales = "free_x", labeller = labeller(CustomGroup = facet_labels), ) +  # Facet by custom groups with custom labels
+  ylab("Relative abundance > 3%") +
+  scale_y_continuous(expand = c(0,0)) +
+  theme_bw() +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(angle = 45, size = 10, hjust = 0.5, vjust = 0.8),
+        axis.ticks.x = element_blank(),
+        panel.background = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        strip.background = element_rect(fill = "white")) +
+        scale_fill_manual(values = colors)
+```
+
+Save the final plot.
+
+```{r}
+ggsave("outputs/beta_diversity/relative_abundance_genus.png", plot = rel_abundance_genus, width = 12, height = 6, units = "in", dpi = 300)
+```
+
+```{r}
+# You can check the relative abundances of a specific taxon (e.g, the genus Erysipelothrix) using the dplyr and microbiome libraries.
+
+# physeq_phylum_genus_ALL <- physeq_rar %>%
+  # tax_glom(taxrank = "Genus") %>%                     
+  # transform_sample_counts(function(x) {x/sum(x)} ) %>% 
+  # psmelt() %>%                                         
+  # arrange(Genus)                                      
+
+# target_level <- "Genus"
+# target_value <- "Erysipelothrix"     
+
+# filtered_df <- physeq_phylum_genus_ALL %>%
+  # filter(.data[[target_level]] == target_value)
+
+# View(filtered_df)
+```
+
+
+## Hierarchical clustering
+
+### Hierarchical ascendant classification
+
+Firstly, we will examine how samples cluster according to their (dis-)similarity using hierarchical ascendant classification (HAC) of samples based on Aitchison distance.
+
+Calculate the distance matrix using Euclidean distance.
+
+```{r}
+physeq_clr_dist <- phyloseq::distance(physeq_clr, method = "euclidean")
+```
+
+Perform sample clustering using different methods.
+
+```{r warning=FALSE}
+# Simple
+spe_single <- hclust(physeq_clr_dist, method = "single")
+
+# Complete
+spe_complete <- hclust(physeq_clr_dist, method = "complete")
+
+# Unweighted pair group with arithmetic mean
+spe_upgma <- hclust(physeq_clr_dist, method = "average")
+
+# Ward
+spe_ward <- hclust(physeq_clr_dist, method = "ward.D")
+
+par(mfrow = c(2, 2))
+plot(spe_single, main = "single")
+plot(spe_complete, main = "complete")
+plot(spe_upgma, main = "UPGMA")
+plot(spe_ward, main = "ward")
+```
+
+### Cophenetic correlation
+
+Next, we will chose the best clustering method as well as the best association coefficient for our analysis.
+We will calculate the ceophenetic distances between all pairs of objects. Then, we will compare this cophenetic  matrix to the original dissimilarity matrix based on cophenetic correlation (Pearson's R correlation). The method with the highest cophenetic correlation is the one yielding the best clustering model.
+
+Compute cophenetic matrix and correlation of the results from the different clustering methods above using the `stats::cophenetic()` function.
+
+```{r echo=TRUE, message=FALSE, results=FALSE}
+spe_single_coph <- cophenetic(spe_single)
+cor(physeq_clr_dist, spe_single_coph)
+spe_complete_coph <- cophenetic(spe_complete)
+cor(physeq_clr_dist, spe_complete_coph)
+spe_upgma_coph <- cophenetic(spe_upgma)
+cor(physeq_clr_dist, spe_upgma_coph)
+spe_ward_coph <- cophenetic(spe_ward)
+cor(physeq_clr_dist, spe_ward_coph)
+```
+
+Plot the original distances against the cophenetic distances in Shepard-like diagrams.
+
+```{r}
+plot_coph_cor <- function(cophenetic_distance, hclust_type){
+
+# Calculate the correlation between cophenetic distance and observed distance
+  cor_res <- round(cor(physeq_clr_dist, cophenetic_distance),3)
+
+# Create a scatter plot
+  plot(x = physeq_clr_dist,
+     y = cophenetic_distance,
+     xlab = "Aitchison distance",
+     ylab = "Cophenetic distance",
+     xlim = c(10, 35), ylim = c(10, 35),
+     main = c(hclust_type, paste("Cophenetic correlation ", cor_res)))
+  abline(0, 1)
+}
+
+par(mfrow=c(2,2))
+
+plot_coph_cor(cophenetic_distance = spe_complete_coph,
+              hclust_type = "Single linkage")
+
+plot_coph_cor(cophenetic_distance = spe_complete_coph,
+              hclust_type = "Complete linkage")
+
+plot_coph_cor(cophenetic_distance = spe_upgma_coph,
+              hclust_type = "Average linkage")
+
+plot_coph_cor(cophenetic_distance = spe_ward_coph,
+              hclust_type = "Ward linkage")
+```
+
+Based on the cophenetic correlation and the plots, choose the best clustering method.
+
+### Defining final clusters
+
+Now we will look for clusters that can be biologically interpreted: we will decide, at which points the dendrogram will be cut. 
+
+Firstly, the right number of clusters can be determined by examining the fusion level values (the dissimilarity between clusters of dendrogram branches).
+Plot the fusion level values for the dendrogram based on the best clusterig method chosen above (e.g., UPGMA).
+
+```{r}
+#Fusion level plot
+par(mfrow = c(1, 1))
+
+plot(x = spe_upgma$height,
+     y = phyloseq::nsamples(physeq_clr):2,
+     type = "S",
+     main = "Fusion levels - Aitchison - Average",
+     ylab = "k (number of cluster)",
+     xlab = "h (node height)")
+
+text(x = spe_upgma$height,
+     y = phyloseq::nsamples(physeq_clr):2,
+     labels = phyloseq::nsamples(physeq_clr):2,
+     col = "red",
+     cex = 0.8)
+```
+
+If the graph does not show clear distinctions between fused groups, we can calculate different indices provided by the `NbClust` package to help determine the right number of clusters.
+
+```{r}
+nclust <- nb_clust_all(data = t(physeq_clr_asv), seed = 1000)
+```
+
+Remember that the clusters must also make sense regarding the nature of your samples and research question.
+
+Go back to the dendrogram and cut it at the corresponding distances.
+
+```{r}
+# Assign your number of clusters
+k <- 5
+
+# Cut the dendrogram into k clusters
+spe_upgma_clust <- cutree(tree = spe_upgma, k = k)
+table(spe_upgma_clust)
+spe_upgma_clust2 <- data.frame(UPGMA_clusters = spe_upgma_clust)
+```
+
+Plot the clustered dendrogram.
+
+```{r}
+plot(spe_upgma,
+     hang = -1,
+     ylab = "Height",
+     main="Aitchison distance - UPGMA")
+
+rect.hclust(spe_upgma,
+            k = k,
+            border = 2:6,
+            cluster = spe_upgma_clust)
+
+legend("topright",
+       paste("Cluster", 1:k),
+       pch = 22,
+       col = 2:(k + 1),
+       bty = "n")
+```
+
+Calculate the clustering robustness via the Dunn index (the higher the Dunn index, the better the clustering) using the `fpc::cluster.stats()` function.
+
+```{r}
+cs <- fpc::cluster.stats(d = physeq_clr_dist,
+                         clustering = spe_upgma_clust)
+
+cs$dunn
+```
+
+
+## Non-metric multidimensional scaling
+
+Next, we will analyze the (dis-)similarity between each pair of samples via non-metric multidimensional scaling (NMDS).
+NMDS does not plot the distances between samples per se, but their rank orders: samples that are similar in reality will be close together in the low-dimensional ordination space. Note that the axes in NMDS are completely arbitrary.
+
+Plot a NMDS on Aitchison distance with `vegan::metaMDS()`, adjusting your k value.
+
+```{r message=FALSE, warning=FALSE, results=FALSE}
+physeq_clr_nmds <- vegan::metaMDS(physeq_clr_dist, k=5, trymax=100) 
+```
+
+The NMDS is reliable if there is a good fit between the distances among objects in the ordination plot and the original distances. Stress values >0.2 are generally poor, whereas values <0.1 are good and <0.05 are excellent.
+
+Run the stressplot.
+
+```{r}
+vegan::stressplot(physeq_clr_nmds)
+```
+
+Plot the NMDS with ggplot2.
+
+```{r}
+nmds_coord <- data.frame(physeq_clr_nmds$points)
+
+# Data formatting
+hull <- data.frame("Axis.1" = nmds_coord[,1],
+                   "Axis.2" = nmds_coord[,2],
+                   "sample" = as.data.frame(sample_data(physeq_clr@sam_data)))
+
+hull_col <- c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")
+names(hull_col) <- c("Acetate","Formate", "Bicarbonate", "Glycine", "Inoculum")
+
+hull_data <- hull %>%
+  dplyr::group_by(sample.Csource) %>%
+  dplyr::slice(chull(Axis.1,Axis.2)) %>%
+  dplyr::mutate(color = hull_col[sample.Csource])
+
+# Plotting the graph
+nmds_plot <- ggplot(hull, aes(x = Axis.1, y = Axis.2)) +
+  geom_hline(yintercept = 0, colour = "lightgrey", linetype = 2) + 
+  geom_vline(xintercept = 0, colour = "lightgrey", linetype = 2) +
+  geom_polygon(data = hull_data,
+               aes(group = sample.Csource, fill = sample.Csource),
+               alpha = 0.3) +
+  scale_fill_manual(values = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +
+  geom_point(aes(color = sample.Csource), alpha = 0.7) +
+  scale_color_manual(name = "Carbon source", values = c("orange", "seagreen3", "royalblue2", "darkorchid3", "gray60")) +
+  xlab("NMDS1") +
+  ylab("NMDS2") +
+  theme_bw() +
+  coord_equal() +
+  geom_text(aes(label = rownames(hull)), size = 3, nudge_x = 2, nudge_y = 2) +
+  theme(axis.title.x = element_text(size = 12), 
+        axis.title.y = element_text(size = 12), 
+        panel.background = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        plot.background = element_blank()) +
+  guides(fill = guide_legend(title = "Carbon source", override.aes = list(alpha = 1)))
+```
+
+Save the final graph.
+
+```{r}
+ggsave("outputs/beta_diversity/nmds.png", plot = nmds_plot, width = 8, height = 6, units = "in", dpi = 300, bg = "white")
+```
+
+
+## Hypothesis testing
+
+### Permutational multiple analysis of variance
+
+Lastly, we will test via permutational multiple analysis of variance (PERMANOVA) whether the (dis-)similarity between samples is significantly influenced by our variables of interest.
+
+Run the PERMANOVA with `vegan::adonis2()`
+
+```{r}
+metadata <- data.frame(sample_data(physeq_clr))
+
+# Influence of Csource (main research question)
+results_permanova_Csource <- vegan::adonis2(physeq_clr_dist ~ Csource,
+                                    data = metadata,
+                                    perm = 1000)
+
+# Influence of Timepoint (check if sample composition changed significantly over time)
+results_permanova_Timepoint <- vegan::adonis2(physeq_clr_dist ~ Timepoint,
+                                    data = metadata,
+                                    perm = 1000)
+
+# Influence of Run (check if sample composition was significantly influenced by the experimental replicate)
+results_permanova_Run <- vegan::adonis2(physeq_clr_dist ~ Run,
+                                    data = metadata,
+                                    perm = 1000)
+# Print results
+results_permanova_Csource
+results_permanova_Timepoint
+results_permanova_Run
+```
+
+You can also run a PERMANOVA on the interaction of variables.
+
+```{r}
+metadata <- data.frame(sample_data(physeq_clr))
+results_permanova_dependent <- vegan::adonis2(physeq_clr_dist ~ Timepoint * Csource,
+                                    data = metadata,
+                                    perm = 1000)
+results_permanova_dependent
+```
+
+### Verifying PERMANOVA results
+
+The PERMANOVA results can be confounded by differences in dispersion between the groups. We will verify if this effect is significant by running an analysis of variance (ANOVA).
+
+```{r}
+# CSource
+anova(vegan::betadisper(physeq_clr_dist, metadata$Csource))
+
+# Timepoint
+anova(vegan::betadisper(physeq_clr_dist, metadata$Timepoint))
+
+# Run
+anova(vegan::betadisper(physeq_clr_dist, metadata$Run))
+```
+
+### Extracting PERMANOVA coefficients
+
+Finally, we will check which ASVs contribute most to the sample (dis-)similarity using the ancient `vegan::adonis()` function.
+
+Plot PERMANOVA coefficients of the top taxa separating the sample groups according to your variable of interest.
+
+```{r}
+# Transpose physeq_clr_asv (the formatting must match metadata, where samples are in rows)
+physeq_clr_asv_trans <- t(physeq_clr_asv)
+
+# Run PERMANOVA
+permanova_Csource <- vegan::adonis((physeq_clr_asv_trans) ~ Csource,
+                            data = metadata,
+                            permutations = 1000,
+                            method = "euclidean")
+
+# Extract top PERMANOVA coefficients
+coef <- coefficients(permanova_Csource)["Csource1",]
+
+top.coef <- coef[rev(order(abs(coef)))[1:10]]
+
+par(mar = c(3, 14, 2, 1))
+
+# Create barplot
+barplot(sort(top.coef),
+        horiz = TRUE,
+        las = 1,
+        main = "Top taxa carbon source",
+        cex.names = 0.7)
+```
